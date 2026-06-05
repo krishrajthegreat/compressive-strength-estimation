@@ -1,8 +1,9 @@
 """
 Optuna hyperparameter optimization objectives for XGBoost, CatBoost, and LightGBM.
 
-Each objective function defines the search space per the design document and
-evaluates candidates via 5-fold inner CV on RMSE.
+Stage B additions:
+  - Monotonic constraints builder for physics-guided tree models
+  - Constraint-aware objective functions
 """
 
 import numpy as np
@@ -15,9 +16,54 @@ import optuna
 from optuna.samplers import TPESampler
 
 
+# ── Monotonic Constraints (Stage B) ─────────────────────────────────────────
+
+# Physics-based monotonicity:
+#   +1 = strength increases with feature (Age, Cement)
+#   -1 = strength decreases with feature (W/B ratio)
+#    0 = unconstrained
+MONOTONIC_MAP = {
+    'Age': 1,
+    'log_Age': 1,
+    'sqrt_Age': 1,
+    'Cement': 1,
+    'W_B_ratio': -1,
+    'W_C_ratio': -1,
+    'effective_WB': -1,
+    'gel_space_ratio': 1,
+}
+
+
+def build_monotonic_constraints(feature_cols: list) -> list:
+    """
+    Build monotonic constraint vector for the given feature columns.
+
+    Parameters
+    ----------
+    feature_cols : list
+        Ordered list of feature column names.
+
+    Returns
+    -------
+    list
+        Constraint values: +1 (increasing), -1 (decreasing), 0 (none).
+    """
+    return [MONOTONIC_MAP.get(col, 0) for col in feature_cols]
+
+
+def build_catboost_constraints(feature_cols: list) -> dict:
+    """Build CatBoost-format monotonic constraints (feature_index: direction)."""
+    constraints = {}
+    for i, col in enumerate(feature_cols):
+        direction = MONOTONIC_MAP.get(col, 0)
+        if direction != 0:
+            constraints[i] = direction
+    return constraints
+
+
 # ── Objective Functions ─────────────────────────────────────────────────────
 
-def objective_xgboost(trial, X, y):
+def objective_xgboost(trial, X, y, monotonic_constraints=None):
     """Optuna objective for XGBoost — minimizes RMSE via 5-fold CV."""
     params = {
         'max_depth': trial.suggest_int('max_depth', 3, 10),
@@ -30,6 +76,9 @@ def objective_xgboost(trial, X, y):
         'random_state': 42,
         'n_jobs': -1,
     }
+    if monotonic_constraints is not None:
+        params['monotone_constraints'] = tuple(monotonic_constraints)
+
     model = xgb.XGBRegressor(**params)
     scores = cross_val_score(
         model, X, y, cv=5,
@@ -41,7 +90,7 @@ def objective_xgboost(trial, X, y):
 def _manual_cv_rmse(model_class, params, X, y, n_splits=5):
     """
     Manual KFold CV for models incompatible with sklearn's cross_val_score.
-    CatBoost 1.2.x doesn't implement __sklearn_tags__ required by sklearn ≥1.8.
+    CatBoost 1.2.x doesn't implement __sklearn_tags__ required by sklearn >=1.8.
     """
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
     rmse_scores = []
@@ -63,7 +112,7 @@ def _manual_cv_rmse(model_class, params, X, y, n_splits=5):
     return np.mean(rmse_scores)
 
 
-def objective_catboost(trial, X, y):
+def objective_catboost(trial, X, y, monotonic_constraints=None):
     """Optuna objective for CatBoost — minimizes RMSE via 5-fold manual CV."""
     params = {
         'depth': trial.suggest_int('depth', 4, 10),
@@ -75,10 +124,13 @@ def objective_catboost(trial, X, y):
         'random_state': 42,
         'verbose': 0,
     }
+    if monotonic_constraints is not None:
+        params['monotone_constraints'] = monotonic_constraints
+
     return _manual_cv_rmse(CatBoostRegressor, params, X, y)
 
 
-def objective_lightgbm(trial, X, y):
+def objective_lightgbm(trial, X, y, monotonic_constraints=None):
     """Optuna objective for LightGBM — minimizes RMSE via 5-fold CV."""
     params = {
         'num_leaves': trial.suggest_int('num_leaves', 15, 127),
@@ -93,6 +145,9 @@ def objective_lightgbm(trial, X, y):
         'n_jobs': -1,
         'verbose': -1,
     }
+    if monotonic_constraints is not None:
+        params['monotone_constraints'] = monotonic_constraints
+
     model = lgb.LGBMRegressor(**params)
     scores = cross_val_score(
         model, X, y, cv=5,
@@ -110,7 +165,12 @@ OBJECTIVE_MAP = {
 }
 
 
-def run_optimization(X, y, model_type: str, n_trials: int = 100) -> dict:
+def run_optimization(
+    X, y,
+    model_type: str,
+    n_trials: int = 100,
+    monotonic_constraints=None,
+) -> dict:
     """
     Run Optuna TPE optimization for the given model type.
 
@@ -124,6 +184,8 @@ def run_optimization(X, y, model_type: str, n_trials: int = 100) -> dict:
         One of 'XGBoost', 'CatBoost', 'LightGBM'.
     n_trials : int
         Number of Optuna trials.
+    monotonic_constraints : list or dict, optional
+        Monotonic constraints to apply during optimization.
 
     Returns
     -------
@@ -141,7 +203,7 @@ def run_optimization(X, y, model_type: str, n_trials: int = 100) -> dict:
         sampler=TPESampler(seed=42),
     )
     study.optimize(
-        lambda trial: objective_fn(trial, X, y),
+        lambda trial: objective_fn(trial, X, y, monotonic_constraints),
         n_trials=n_trials,
         show_progress_bar=True,
     )

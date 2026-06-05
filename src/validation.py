@@ -20,14 +20,23 @@ from src.optimization import OBJECTIVE_MAP
 
 # ── Model factory ───────────────────────────────────────────────────────────
 
-def _create_model(model_type: str, params: dict):
-    """Instantiate a model with the given hyperparameters."""
+def _create_model(model_type: str, params: dict, monotonic_constraints=None):
+    """Instantiate a model with the given hyperparameters and optional constraints."""
+    extra = {}
+    if monotonic_constraints is not None:
+        if model_type == 'XGBoost':
+            extra['monotone_constraints'] = tuple(monotonic_constraints)
+        elif model_type == 'CatBoost':
+            extra['monotone_constraints'] = monotonic_constraints
+        elif model_type == 'LightGBM':
+            extra['monotone_constraints'] = monotonic_constraints
+
     if model_type == 'XGBoost':
-        return xgb.XGBRegressor(**params, random_state=42, n_jobs=-1)
+        return xgb.XGBRegressor(**params, **extra, random_state=42, n_jobs=-1)
     elif model_type == 'CatBoost':
-        return CatBoostRegressor(**params, random_state=42, verbose=0)
+        return CatBoostRegressor(**params, **extra, random_state=42, verbose=0)
     elif model_type == 'LightGBM':
-        return lgb.LGBMRegressor(**params, random_state=42, n_jobs=-1, verbose=-1)
+        return lgb.LGBMRegressor(**params, **extra, random_state=42, n_jobs=-1, verbose=-1)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -40,6 +49,7 @@ def nested_cv_with_optuna(
     model_type: str,
     n_outer_folds: int = 5,
     n_trials: int = 100,
+    monotonic_constraints=None,
 ) -> dict:
     """
     Full nested cross-validation: outer loop for unbiased performance
@@ -83,7 +93,7 @@ def nested_cv_with_optuna(
             direction='minimize', sampler=TPESampler(seed=42 + fold_idx),
         )
         study.optimize(
-            lambda trial: objective_fn(trial, X_train, y_train),
+            lambda trial: objective_fn(trial, X_train, y_train, monotonic_constraints),
             n_trials=n_trials,
             show_progress_bar=False,
         )
@@ -91,7 +101,7 @@ def nested_cv_with_optuna(
         best_params_per_fold.append(best_params)
 
         # Train on outer training set
-        model = _create_model(model_type, best_params)
+        model = _create_model(model_type, best_params, monotonic_constraints)
         model.fit(X_train, y_train)
 
         # Evaluate on outer test set

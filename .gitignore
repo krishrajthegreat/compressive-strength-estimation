@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# ML / Training Outputs
+catboost_info/
+outputs_stage_b/
+models_stage_b/
+outputs/
+models/
+best_hyperparameters*.json
+*.pkl
+*.db
